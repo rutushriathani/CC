@@ -1,0 +1,6 @@
+FROM base
+WORKDIR /app
+ENV GREETING=Hello
+COPY main.py /app
+RUN echo "Build successful"
+CMD ["sh", "-c", "echo $GREETING from Docksmith"]

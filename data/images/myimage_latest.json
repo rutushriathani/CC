@@ -1,0 +1,8 @@
+{
+    "tag": "myimage:latest",
+    "config": {
+        "working_dir": "app",
+        "image_data_path": "/Users/rutu/Desktop/CC_mini/CC_MP/docksmith/data/image_data/myimage_latest"
+    },
+    "layers": []
+}
