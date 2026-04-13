@@ -1,87 +1,133 @@
 import os
-import sys
-import shutil
-from utils import parse_docksmithfile
-from image import STATE_DIR, save_image_manifest
+import json
+import tarfile
+import hashlib
+from datetime import datetime
 
-def build_image(context_dir, tag, no_cache):
-    # 1. Parse Docksmithfile
-    docksmithfile = os.path.join(context_dir, 'Docksmithfile')
-    if not os.path.exists(docksmithfile):
-        print(f"Docksmithfile not found in {context_dir}")
-        sys.exit(1)
+def create_layer(source_dir, layer_path):
+    with tarfile.open(layer_path, "w") as tar:
+        tar.add(source_dir, arcname=".")
 
-    steps = parse_docksmithfile(docksmithfile)
+def get_hash(text):
+    return hashlib.sha256(text.encode()).hexdigest()
 
-    # 2. Setup Temporary build root folder
-    temp_root = os.path.join(STATE_DIR, 'tmp', tag.replace(':', '_'))
-    if os.path.exists(temp_root):
-        shutil.rmtree(temp_root)
-    os.makedirs(temp_root, exist_ok=True)
+def build_image(context, tag, no_cache):
+    print("Reading Docksmithfile...")
 
-    # Variables to track image state
-    current_workdir = "/"
+    file_path = os.path.join(context, "Docksmithfile")
 
-    # 3. Execute Build Steps
-    for step_num, step in enumerate(steps, start=1):
-        instr = step['instr'].upper()
-        arg = step.get('arg', '').strip()
-        print(f"Step {step_num}/{len(steps)} : {instr} {arg}")
+    if not os.path.exists(file_path):
+        print("Error: Docksmithfile not found")
+        return
 
-        # Handle WORKDIR
-        if instr == 'WORKDIR':
-            current_workdir = arg
-            workdir_path = arg[1:] if arg.startswith('/') else arg
-            full_workdir = os.path.join(temp_root, workdir_path)
-            os.makedirs(full_workdir, exist_ok=True)
+    original_dir = os.getcwd()
 
-        # Handle COPY
-        elif instr == 'COPY':
-            arg_parts = arg.split()
-            if len(arg_parts) >= 2:
-                src, dst = arg_parts[0], arg_parts[1]
-                
-                # Make destination relative to temp_root
-                dst_relative = dst[1:] if dst.startswith('/') else dst
-                dst_path = os.path.join(temp_root, dst_relative)
-                
-                # Ensure destination directory exists
-                if dst.endswith('/') or not os.path.basename(dst):
-                    os.makedirs(dst_path, exist_ok=True)
-                    dst_path = os.path.join(dst_path, os.path.basename(src))
-                else:
-                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    images_dir = os.path.expanduser("~/.docksmith/images")
+    layers_dir = os.path.expanduser("~/.docksmith/layers")
+    cache_dir = os.path.expanduser("~/.docksmith/cache")
 
-                src_full_path = os.path.join(context_dir, src)
-                if os.path.exists(src_full_path):
-                    shutil.copy2(src_full_path, dst_path)
-                else:
-                    print(f"Error: Source file {src} not found in context.")
-                    sys.exit(1)
+    os.makedirs(images_dir, exist_ok=True)
+    os.makedirs(layers_dir, exist_ok=True)
+    os.makedirs(cache_dir, exist_ok=True)
 
-    # 4. FINAL REGISTRATION
-    # Define where the permanent image files will live
-    image_files_dir = os.path.join(STATE_DIR, 'image_data', tag.replace(':', '_'))
-    
-    if os.path.exists(image_files_dir):
-        shutil.rmtree(image_files_dir)
-    os.makedirs(os.path.dirname(image_files_dir), exist_ok=True)
-    
-    # Move built files from temp to permanent storage
-    shutil.move(temp_root, image_files_dir)
+    layer_count = 0
+    cmd_to_run = ""
 
-    # Create the metadata dictionary
-    manifest_data = {
-        "tag": tag,
-        "config": {
-            "working_dir": current_workdir,
-            "image_data_path": image_files_dir
-        },
-        "layers": [] 
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    for line in lines:
+        line = line.strip()
+
+        if not line:
+            continue
+
+        print("Processing:", line)
+
+        parts = line.split(" ", 1)
+        instruction = parts[0]
+
+        # -------- FROM --------
+        if instruction == "FROM":
+            print("Using base image:", parts[1])
+
+        # -------- WORKDIR --------
+        elif instruction == "WORKDIR":
+            path = parts[1]
+            print("Setting WORKDIR:", path)
+            os.makedirs(path, exist_ok=True)
+            os.chdir(path)
+
+        # -------- COPY --------
+        elif instruction == "COPY":
+            hash_val = get_hash(line)
+            cache_path = os.path.join(cache_dir, hash_val)
+
+            if os.path.exists(cache_path) and not no_cache:
+                print("[CACHE HIT] COPY skipped")
+                continue
+            else:
+                print("[CACHE MISS] COPY executing")
+
+            src, dest = parts[1].split(" ")
+            os.system(f"cp -r {src} {dest}")
+
+            open(cache_path, "w").close()
+
+            layer_count += 1
+            layer_path = os.path.join(layers_dir, f"layer{layer_count}.tar")
+            create_layer(original_dir, layer_path)
+            print("Layer created:", layer_path)
+
+        # -------- ENV --------
+        elif instruction == "ENV":
+            key, value = parts[1].split("=")
+            os.environ[key] = value
+
+        # -------- RUN --------
+        elif instruction == "RUN":
+            hash_val = get_hash(line)
+            cache_path = os.path.join(cache_dir, hash_val)
+
+            if os.path.exists(cache_path) and not no_cache:
+                print("[CACHE HIT] RUN skipped")
+                continue
+            else:
+                print("[CACHE MISS] RUN executing")
+
+            os.system(parts[1])
+
+            open(cache_path, "w").close()
+
+            layer_count += 1
+            layer_path = os.path.join(layers_dir, f"layer{layer_count}.tar")
+            create_layer(original_dir, layer_path)
+            print("Layer created:", layer_path)
+
+        # -------- CMD --------
+        elif instruction == "CMD":
+            cmd_to_run = parts[1]
+
+        else:
+            print("Unknown instruction:", instruction)
+            return
+
+    name, tag_val = tag.split(":")
+    image_path = os.path.join(images_dir, f"{name}_{tag_val}.json")
+
+    image_data = {
+        "name": name,
+        "tag": tag_val,
+        "created": str(datetime.now()),
+        "cmd": cmd_to_run,
+        "layers": layer_count
     }
 
-    # CRITICAL: Call the function from image.py to save the .json file
-    # This is what makes 'docksmith images' show the result!
-    save_image_manifest(tag, manifest_data)
+    with open(image_path, "w") as f:
+        json.dump(image_data, f, indent=4)
 
-    print(f"Successfully built and tagged {tag}")
+    print("Image saved at:", image_path)
+
+    os.chdir(original_dir)
+
+    print("Build complete!")
