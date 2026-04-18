@@ -79,3 +79,19 @@ def save_cache_index(index_data):
     ensure_cache_index()
     with open(CACHE_INDEX_PATH, "w") as f:
         json.dump(index_data, f)
+def show_history(name_tag):
+    import os
+
+    print("Image History for:", name_tag)
+
+    if not os.path.exists("Docksmithfile"):
+        print("Docksmithfile not found")
+        return
+
+    with open("Docksmithfile", "r") as f:
+        lines = f.readlines()
+
+    for line in lines:
+        line = line.strip()
+        if line:
+            print(line)
